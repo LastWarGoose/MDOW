@@ -2,7 +2,11 @@ import sys
 
 
 def main():
-    if "--youtube-worker" in sys.argv:
+    from app.adapters.stdio import configure_stdio
+
+    worker = "--youtube-worker" in sys.argv
+    configure_stdio(worker=worker)
+    if worker:
         from app.adapters.youtube_worker import main as worker_main
 
         return worker_main(sys.argv[2:])

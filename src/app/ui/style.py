@@ -12,6 +12,11 @@ QLineEdit, QPlainTextEdit { background: #111112; border: 1px solid #403933;
 QLineEdit:hover, QPlainTextEdit:hover { border-color: #68503c; }
 QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #ff7800; }
 QLineEdit:disabled, QPlainTextEdit:disabled { background: #151414; color: #74685e; border-color: #322b26; }
+QInputDialog QComboBox, QInputDialog QComboBox QAbstractItemView {
+ color: #ffffff; background-color: #303030; border: 1px solid #565656;
+ selection-color: #ffffff; selection-background-color: #505050; }
+QInputDialog QComboBox QAbstractItemView::item:selected {
+ color: #ffffff; background-color: #505050; }
 QPushButton { background: #26211d; border: 1px solid #65503d; border-radius: 2px;
  padding: 10px 15px; color: #e4d6c9; outline: none; }
 QPushButton:hover { background: #36271d; border-color: #ff7800; color: #ff941f; }

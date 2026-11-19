@@ -36,12 +36,15 @@ def test_fullscreen_shortcut_restores_window(qtbot, maximized, key):
     qtbot.waitUntil(window.isActiveWindow)
     window.lyrics.setFocus()
     qtbot.wait(50)
+    geometry = window.geometry()
     qtbot.keyClick(window.lyrics, key, modifier=Qt.KeyboardModifier.AltModifier)
     qtbot.waitUntil(window.isFullScreen)
+    assert window.windowHandle().safeAreaMargins().top() == 0
     qtbot.wait(50)
     qtbot.keyClick(window.lyrics, key, modifier=Qt.KeyboardModifier.AltModifier)
     qtbot.waitUntil(lambda: not window.isFullScreen())
     qtbot.waitUntil(lambda: window.isMaximized() == maximized)
+    qtbot.waitUntil(lambda: window.geometry() == geometry)
     assert window.worker is None
 
 

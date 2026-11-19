@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -24,11 +25,13 @@ from PySide6.QtWidgets import (
 from app.adapters.covers import crop_cover, load_cover_source
 from app.models.task import AppError, Tags
 from app.services.audio import AudioService
+from app.services.lookup import LookupService, is_search
 from app.services.validation import safe_filename, youtube_url
 from app.ui.cover_import import CoverDropArea, clipboard_cover_source, mime_source
 from app.ui.crop import CropDialog
 from app.ui.design import IndustrialBackground, IndustrialPanel
 from app.ui.style import STYLE
+from app.ui.windows_frame import WindowPlacement
 from app.ui.worker import Worker
 
 _NO_RESULT = object()
@@ -52,9 +55,13 @@ def button(text, action, primary=False):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service=None, *, check_tools=True):
+    def __init__(self, service=None, *, check_tools=True, lookup=None):
         super().__init__()
         self.service = service or AudioService()
+        self.lookup = lookup or LookupService()
+        self.download_tags = Tags()
+        self.edited_fields = set()
+        self.cover_source = None
         self.worker = None
         self._job_result = _NO_RESULT
         self._job_success = None
@@ -64,7 +71,12 @@ class MainWindow(QMainWindow):
         self.ready = False
         self.editor_available = False
         self._was_maximized = False
+        self._window_placement = None
         self.status_message = ""
+        self._windows_title_bar = QApplication.platformName() == "windows"
+        if self._windows_title_bar:
+            QApplication.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.ExpandedClientAreaHint)
         self.setWindowTitle("MDOW")
         self.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "assets" / "md.ico")))
         self.resize(1080, 820)
@@ -90,14 +102,24 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.check_tools)
 
     def toggle_fullscreen(self):
-        if self.isFullScreen():
-            if self._was_maximized:
-                self.showMaximized()
-            else:
-                self.showNormal()
-        else:
+        caption = Qt.WindowType.ExpandedClientAreaHint
+        if not self.isFullScreen():
             self._was_maximized = self.isMaximized()
+            if self._windows_title_bar:
+                self._window_placement = WindowPlacement.capture(self.winId())
+                self.setWindowFlags(self.windowFlags() & ~caption)
             self.showFullScreen()
+            return
+
+        if self._windows_title_bar:
+            self.setWindowFlags(self.windowFlags() | caption)
+        if self._was_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        if self._window_placement is not None:
+            self._window_placement.restore(self.winId())
+            self._window_placement = None
 
     def build_ui(self):
         central = IndustrialBackground()
@@ -127,10 +149,15 @@ class MainWindow(QMainWindow):
         source_layout.addWidget(label("Добавьте аудио", "heading"))
         row = QHBoxLayout()
         self.url = QLineEdit()
-        self.url.setPlaceholderText("https://www.youtube.com/watch?v=…")
-        self.url.setAccessibleName("Ссылка на ролик YouTube")
+        self.url.setPlaceholderText("Ссылка YouTube или название песни")
+        self.url.setAccessibleName("Ссылка YouTube или название песни")
         self.url.returnPressed.connect(self.start_download)
         self.download_button = button("Загрузить аудио", self.start_download, True)
+        self.url.textChanged.connect(
+            lambda text: self.download_button.setText(
+                "Найти" if is_search(text) else "Загрузить аудио"
+            )
+        )
         self.import_button = button("Открыть файл…", self.import_file)
         row.addWidget(self.url, 1)
         row.addWidget(self.download_button)
@@ -162,6 +189,8 @@ class MainWindow(QMainWindow):
         cover_actions.addWidget(self.cover_button)
         cover_actions.addWidget(self.remove_cover_button)
         cover_column.addLayout(cover_actions)
+        self.crop_button = button("Кадрировать", self.recrop)
+        cover_column.addWidget(self.crop_button)
         self.play_button = button("▶  Прослушать", self.toggle_play)
         cover_column.addWidget(self.play_button)
         self.duration = label("Аудио ещё не добавлено", "muted")
@@ -197,6 +226,9 @@ class MainWindow(QMainWindow):
         self.lyrics.setPlaceholderText("Вставьте текст песни. Переносы строк сохранятся.")
         self.lyrics.setMinimumHeight(120)
         self.lyrics.textChanged.connect(self.mark_dirty)
+        self.lyrics.textChanged.connect(lambda: self.edited_fields.add("lyrics"))
+        for field, widget in self.tag_inputs().items():
+            widget.textChanged.connect(lambda _, name=field: self.edited_fields.add(name))
         fields.addWidget(self.lyrics, 4, 0, 1, 2)
         fields.setRowStretch(4, 1)
         self.counter = label("0 / 100 000 символов", "muted")
@@ -240,6 +272,8 @@ class MainWindow(QMainWindow):
         self.editor.setEnabled(self.editor_available)
         self.cover.setEnabled(self.editor_available and not busy)
         self.cover_button.setEnabled(self.editor_available and not busy)
+        self.crop_button.setVisible(self.cover_source is not None)
+        self.crop_button.setEnabled(self.editor_available and not busy)
         self.remove_cover_button.setEnabled(
             self.editor_available and not busy and bool(self.cover_data)
         )
@@ -306,11 +340,13 @@ class MainWindow(QMainWindow):
             self.progress.setValue(percent)
 
     def on_metadata(self, values):
+        self.download_tags = values
         self.title_input.setText(values.title)
         self.artist_input.setText(values.artist)
         self.album_input.setText(values.album)
         self.lyrics.setPlainText(values.lyrics)
         self.set_cover(values.cover)
+        self.edited_fields.clear()
         self.editor_available = True
         self.dirty = True
         self.update_controls()
@@ -345,6 +381,9 @@ class MainWindow(QMainWindow):
             widget.clear()
         self.lyrics.clear()
         self.set_cover(None)
+        self.cover_source = None
+        self.download_tags = Tags()
+        self.edited_fields.clear()
         self.dirty = False
         self.duration.setText("Подготовка аудио…")
 
@@ -352,19 +391,98 @@ class MainWindow(QMainWindow):
         if self.worker is not None or not self.confirm_discard():
             return
         self.reset_editor()
-        self.run_job(
-            lambda c, p, m: self.service.prepare(source, is_url, c, p, m), self.audio_ready
-        )
+
+        def prepared(result):
+            self.audio_ready(result)
+            if is_url:
+                tags = self.download_tags
+                self.set_status("Поиск текста и обложки…")
+                self.progress.setRange(0, 0)
+                self.run_job(
+                    lambda c, *_: self.lookup.enrich(source, tags, result["duration"], c),
+                    self.apply_lookup,
+                )
+
+        self.run_job(lambda c, p, m: self.service.prepare(source, is_url, c, p, m), prepared)
+
+    def tag_inputs(self):
+        return {"title": self.title_input, "artist": self.artist_input, "album": self.album_input}
+
+    def apply_lookup(self, result):
+        tags, source, cover, issues = result
+        for field, widget in self.tag_inputs().items():
+            value = getattr(tags, field)
+            if (
+                value
+                and field not in self.edited_fields
+                and (field == "title" or not widget.text())
+            ):
+                widget.setText(value)
+        if tags.lyrics and "lyrics" not in self.edited_fields and not self.lyrics.toPlainText():
+            self.lyrics.setPlainText(tags.lyrics)
+        if cover and not self.cover_data:
+            self.set_cover(cover)
+            self.cover_source = source
+        self.progress.setValue(100)
+        self.set_status(" ".join(issues) or "Данные дорожки готовы.")
+
+    def recrop(self):
+        if self.cover_source and not self.worker:
+            self.select_cover_crop(self.cover_source)
 
     def start_download(self):
         if self.worker:
             return
+        value = self.url.text().strip()
+        if is_search(value):
+            if len(value) > 200:
+                self.on_error("Введите название длиной до 200 символов.")
+                return
+            self.set_status("Поиск видео…")
+            self.progress.setRange(0, 0)
+            self.run_job(lambda c, *_: self.lookup.search(value, c), self.choose_result)
+            return
         try:
-            url = youtube_url(self.url.text())
+            url = youtube_url(value)
         except AppError as exc:
             self.on_error(str(exc))
             return
         self.prepare(url, True)
+
+    def choose_result(self, choices):
+        if not choices:
+            self.on_error("Видео не найдено. Уточните название или добавьте исполнителя.")
+            return
+        labels = []
+        for number, item in enumerate(choices, 1):
+            seconds = item.get("duration")
+            duration = "время не указано"
+            if seconds is not None:
+                minutes, seconds = divmod(int(seconds), 60)
+                hours, minutes = divmod(minutes, 60)
+                duration = (
+                    f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+                )
+            row = f"{number}.  [{duration}]  {item['title']}"
+            if item["channel"]:
+                row += f" · {item['channel']}"
+            labels.append(row)
+        flags = Qt.WindowType.Dialog
+        if self._windows_title_bar:
+            flags |= (
+                Qt.WindowType.ExpandedClientAreaHint
+                | Qt.WindowType.CustomizeWindowHint
+                | Qt.WindowType.WindowTitleHint
+                | Qt.WindowType.WindowSystemMenuHint
+                | Qt.WindowType.WindowCloseButtonHint
+            )
+        choice, ok = QInputDialog.getItem(
+            self, "Выберите видео", "Результаты YouTube", labels, 0, False, flags
+        )
+        if ok:
+            url = youtube_url(choices[labels.index(choice)]["url"])
+            self.url.setText(url)
+            self.prepare(url, True)
 
     def import_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -426,17 +544,22 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selection = dialog.selection()
             self.set_status("Подготовка обложки…")
-            self.run_job(lambda c, *_: crop_cover(source, selection, c), self.cover_ready)
+            self.run_job(
+                lambda c, *_: crop_cover(source, selection, c),
+                lambda data: self.cover_ready(data, source),
+            )
         else:
             self.set_status("Обложка не изменена")
         dialog.deleteLater()
 
-    def cover_ready(self, data):
+    def cover_ready(self, data, source):
+        self.cover_source = source
         self.set_cover(data)
         self.mark_dirty()
         self.set_status("Обложка добавлена. Сохраните MP3, чтобы записать изменения.")
 
     def remove_cover(self):
+        self.cover_source = None
         self.set_cover(None)
         self.mark_dirty()
 

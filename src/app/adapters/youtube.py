@@ -1,8 +1,7 @@
 import json
-import sys
 from pathlib import Path
 
-from app.adapters.process import run_process
+from app.adapters.process import run_process, worker_command
 from app.models.task import AppError, Tags
 from app.services.validation import MAX_BYTES, check_space, youtube_url
 
@@ -37,14 +36,7 @@ class YouTube:
                 raise AppError("Размер загрузки превысил 500 МБ.")
             check_space(directory, 0)
 
-        executable = Path(sys.executable)
-        if executable.name.lower() == "pythonw.exe":
-            executable = executable.with_name("python.exe")
-        prefix = (
-            [sys.executable, "--youtube-worker"]
-            if getattr(sys, "frozen", False)
-            else [str(executable), "-m", "app.adapters.youtube_worker"]
-        )
+        prefix = worker_command("youtube")
         run_process(prefix + [url, str(directory)], cancel, on_line=event, tick=tick, timeout=1800)
         if result is None or result.parent != Path(directory).resolve() or not result.is_file():
             raise AppError("Загрузчик не вернул аудиофайл.")

@@ -2,8 +2,10 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 from app.models.task import AppError
 
@@ -30,6 +32,15 @@ def stop_process(process):
     if process.poll() is None:
         process.kill()
     process.wait(timeout=10)
+
+
+def worker_command(name):
+    if getattr(sys, "frozen", False):
+        return [sys.executable, f"--{name}-worker"]
+    executable = Path(sys.executable)
+    if executable.name.lower() == "pythonw.exe":
+        executable = executable.with_name("python.exe")
+    return [str(executable), "-m", f"app.adapters.{name}_worker"]
 
 
 def run_process(args, cancel, *, timeout=1800, on_line=None, tick=None):
